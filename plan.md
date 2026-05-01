@@ -1,102 +1,102 @@
-Plan de Estudio Técnico: Laboratorio LLMOps E2E de Bajo Costo en GKE
+Technical Study Plan: Low-Cost End-to-End LLMOps Lab on GKE
 
-Este plan de estudio ha sido diseñado para transformar el conocimiento teórico en capacidad arquitectónica real. A diferencia de los codelabs empaquetados que ocultan las complejidades operativas, este laboratorio exige la construcción del stack desde cero mediante Infraestructura como Código (IaC). Como arquitectos, nuestra meta no es solo "hacerlo funcionar", sino optimizar la relación costo-rendimiento utilizando hardware accesible como las GPUs NVIDIA L4, evitando la burocracia y los costos prohibitivos de las TPUs.
+This study plan is designed to turn theoretical knowledge into real architectural capability. Unlike packaged codelabs that hide operational complexity, this lab requires building the stack from scratch using Infrastructure as Code (IaC). As architects, our goal is not only to "make it work," but to optimize the cost-performance ratio using accessible hardware such as NVIDIA L4 GPUs, avoiding the bureaucracy and prohibitive costs of TPUs.
 
-1. Fundamentos de Arquitectura de Inferencia Desagregada
+1. Fundamentals of Disaggregated Inference Architecture
 
-La inferencia de modelos Transformer es inherentemente ineficiente cuando se ejecuta de forma monolítica. Debemos entender la separación física de las fases para eliminar cuellos de botella:
+Transformer inference is inherently inefficient when run monolithically. We must understand the physical separation of phases to remove bottlenecks:
 
-* Prefill (Fase de Prefijo): Procesa el prompt de entrada para calcular los estados de atención iniciales. Es una operación compute-bound (limitada por cómputo) debido a las intensas multiplicaciones de matrices. En arquitecturas compartidas, un prefill pesado bloquea los pasos de decodificación de otros usuarios.
-* Decode (Fase de Decodificación): Genera tokens de forma autoregresiva. Es un proceso memory-bound (limitado por ancho de banda de memoria) que depende de la velocidad de lectura de los pesos desde la HBM (High Bandwidth Memory). Aquí, los ciclos de cómputo suelen desperdiciarse.
+* Prefill (Prefix Phase): Processes the input prompt to compute initial attention states. It is a compute-bound operation due to intensive matrix multiplications. In shared architectures, a heavy prefill blocks other users' decoding steps.
+* Decode (Decoding Phase): Generates tokens autoregressively. It is a memory-bound process limited by how fast weights can be read from HBM (High Bandwidth Memory). Here, compute cycles are often underutilized.
 
-La Desagregación Prefill-Decode (PD Disaggregation) rompe este conflicto asignando cada fase a nodos especializados, permitiendo que el prefill no degrade la interactividad del decode.
+Prefill-Decode (PD) Disaggregation breaks this conflict by assigning each phase to specialized nodes, allowing prefill to stop degrading decode interactivity.
 
-Métricas Crave de Rendimiento (North Star Metrics)
+Critical Performance Metrics (North Star Metrics)
 
-Métrica	Fase Crítica	Impacto Arquitectónico
-TTFT (Time to First Token)	Prefill	Sensibilidad del sistema. Reducir mediante cómputo masivo o KV Cache Hits.
-TPOT (Time Per Output Token)	Decode	Velocidad de lectura percibida. Depende del ancho de banda de memoria.
-Throughput (Tokens/Sec)	Ambas	Capacidad total del sistema. Optimizado mediante batching y desacoplamiento.
-Queue Latency	Global	Tiempo de espera en cola antes del procesamiento.
+Metric	Critical Phase	Architectural Impact
+TTFT (Time to First Token)	Prefill	System responsiveness. Reduce through massive compute or KV cache hits.
+TPOT (Time Per Output Token)	Decode	Perceived reading speed. Depends on memory bandwidth.
+Throughput (Tokens/Sec)	Both	Total system capacity. Optimized through batching and decoupling.
+Queue Latency	Global	Waiting time in queue before processing.
 
-2. Configuración de la Capa Física (Módulo 1: Infraestructura)
+2. Physical Layer Setup (Module 1: Infrastructure)
 
-Para este laboratorio, utilizaremos Terraform en la carpeta 1-infra/. El despliegue se basa en un diseño de "AI Hypercomputer" simplificado para bajo costo.
+For this lab, we will use Terraform in the `1-infra/` folder. The deployment is based on a simplified AI Hypercomputer design focused on low cost.
 
-Redes y VPC: El Mandato del MTU
+Networking and VPC: The MTU Mandate
 
-La configuración de red no es negociable. Se debe implementar una VPC personalizada con un MTU de 8896 (Jumbo Frames).
+Network configuration is non-negotiable. A custom VPC must be implemented with an MTU of 8896 (Jumbo Frames).
 
-* Justificación: El tráfico de tensores entre nodos de prefill y decode mediante NCCL (NVIDIA Collective Communications Library) es masivo. Un MTU estándar de 1500 provocaría fragmentación de paquetes, degradando la estabilidad y el rendimiento de la inferencia distribuida.
+* Justification: Tensor traffic between prefill and decode nodes via NCCL (NVIDIA Collective Communications Library) is massive. A standard MTU of 1500 would cause packet fragmentation, degrading distributed inference stability and performance.
 
-GKE Standard: Gestión de Node Pools
+GKE Standard: Node Pool Management
 
-Evitaremos GKE Autopilot para mantener control total sobre la programación de hardware. Configuraremos tres pools específicos:
+We will avoid GKE Autopilot to keep full control over hardware scheduling. We will configure three specific pools:
 
-1. System Pool: Nodos de CPU estándar para servicios de gestión.
-2. GPU Pools (L4): Dos pools especializados utilizando instancias g2-standard-12 (1x L4) o g2-standard-24 (2x L4).
-  * Taints: Es obligatorio aplicar Taints estrictos (nvidia.com/gpu:NoSchedule) para asegurar que la VRAM sea territorio exclusivo del modelo, evitando "noisy neighbors".
-  * Instancias Spot: Para profesionales conscientes del presupuesto, el uso de nodos Spot es el estándar de facto, permitiendo operar por debajo de los $5 USD/hora.
+1. System Pool: Standard CPU nodes for management services.
+2. GPU Pools (L4): Two specialized pools using `g2-standard-12` (1x L4) or `g2-standard-24` (2x L4) instances.
+  * Taints: Applying strict taints (`nvidia.com/gpu:NoSchedule`) is mandatory to ensure VRAM is exclusive model territory and avoid noisy neighbors.
+  * Spot Instances: For budget-conscious professionals, Spot nodes are the de facto standard, enabling operation below $5 USD/hour.
 
-3. Middleware y Orquestación (Módulo 2: Platform)
+3. Middleware and Orchestration (Module 2: Platform)
 
-La capa de plataforma (2-platform/) actúa como el sistema operativo de nuestra infraestructura de IA.
+The platform layer (`2-platform/`) acts as the operating system of our AI infrastructure.
 
-* KubeRay Operator: Fundamental para la coordinación. A diferencia de un pod estático, vLLM requiere un nodo "Head" que gestione el estado global de la memoria y nodos "Workers" que ejecuten el cómputo.
-* Inference Extension API & kgateway: Implementaremos el ruteo mediante kgateway (basado en Envoy). Esta capa no es un balanceador de carga HTTP simple; es un motor de ruteo inteligente que implementa el Endpoint Picker Protocol (EPP), permitiendo seleccionar el backend basándose en la utilización del KV Cache y la profundidad de la cola.
+* KubeRay Operator: Fundamental for coordination. Unlike a static pod, vLLM requires a "Head" node that manages global memory state and "Worker" nodes that execute compute.
+* Inference Extension API & kgateway: We will implement routing through kgateway (Envoy-based). This layer is not a simple HTTP load balancer; it is an intelligent routing engine implementing the Endpoint Picker Protocol (EPP), enabling backend selection based on KV cache utilization and queue depth.
 
-4. Observabilidad y Monitoreo de LLMOps (Módulo 3: LLMops)
+4. LLMOps Observability and Monitoring (Module 3: LLMOps)
 
-Sin métricas granulares, el arquitecto está "volando a ciegas". La configuración de dcgm-exporter debe ser el pilar de nuestra telemetría.
+Without granular metrics, the architect is "flying blind." The dcgm-exporter setup must be the core pillar of telemetry.
 
-Especificación de Recolección (PromQL Targets)
+Collection Specification (PromQL Targets)
 
-Debemos capturar métricas que revelen la saturación del hardware:
+We must capture metrics that reveal hardware saturation:
 
-* dcgm_gpu_temp: Para monitorear el estrangulamiento térmico.
-* vllm:kv_cache_usage_ratio: El indicador clave de salud. Un ratio del 100% indica que el sistema comenzará a desalojar contexto o a re-computar.
-* dcgm_tensor_copy_util: Para identificar si estamos limitados por cómputo (Compute-bound).
+* `dcgm_gpu_temp`: To monitor thermal throttling.
+* `vllm:kv_cache_usage_ratio`: The key health indicator. A 100% ratio means the system will begin evicting context or recomputing.
+* `dcgm_tensor_copy_util`: To identify whether we are compute-bound.
 
-Dashboard de Grafana
+Grafana Dashboard
 
-El diseño debe incluir paneles que correlacionen el Uso de KV Cache con la Latencia de la Cola. Si la latencia aumenta mientras la VRAM está llena, hemos identificado un cuello de botella de memoria que requiere escalado horizontal o políticas de Tiered Storage.
+The design must include panels that correlate KV cache usage with queue latency. If latency rises while VRAM is full, we have identified a memory bottleneck requiring horizontal scaling or tiered storage policies.
 
-5. Despliegue de Workloads e Inferencia Distribuida (Módulo 4: Workloads)
+5. Workload Deployment and Distributed Inference (Module 4: Workloads)
 
-Utilizaremos llm-d, el framework de Red Hat, Google e IBM, para gestionar la inferencia distribuida.
+We will use llm-d, the framework from Red Hat, Google, and IBM, to manage distributed inference.
 
-* Configuración de Modelo: Para este laboratorio, el "caballo de batalla" será Llama-3-8B-Instruct. Aunque la infraestructura es capaz de servir Qwen3-32B o Llama-3.1-405B, el modelo 8B garantiza que las pruebas de carga no agoten el presupuesto.
-* Workload Identity: No se permite el uso de llaves estáticas. Debemos configurar Workload Identity para que los pods de vLLM accedan de forma segura a los buckets de GCS para cargar pesos y secretos de Hugging Face.
-* Ruteo de Inferencia: En inference-routing.yaml, definiremos InferencePool (el conjunto de recursos) e InferenceModel (la abstracción del servicio), permitiendo al Gateway realizar ruteo basado en la criticidad de la solicitud (InferenceObjective).
+* Model Setup: For this lab, the workhorse model will be `Llama-3-8B-Instruct`. Although the infrastructure can serve Qwen3-32B or Llama-3.1-405B, the 8B model ensures load tests do not exceed budget.
+* Workload Identity: Static keys are not allowed. We must configure Workload Identity so vLLM pods securely access GCS buckets for weights and Hugging Face secrets.
+* Inference Routing: In `inference-routing.yaml`, we will define `InferencePool` (resource set) and `InferenceModel` (service abstraction), allowing the Gateway to route based on request criticality (`InferenceObjective`).
 
-6. Gestión Avanzada de KV Cache y GKE Inference Gateway
+6. Advanced KV Cache Management and GKE Inference Gateway
 
-El KV Cache es el recurso más caro y crítico en inferencia. Implementaremos una estrategia de Tiered KV Cache (LMCache) para expandir la capacidad más allá de la HBM de la GPU.
+KV cache is the most expensive and critical resource in inference. We will implement a Tiered KV Cache (LMCache) strategy to expand capacity beyond GPU HBM.
 
-Jerarquía de Almacenamiento y Rendimiento
+Storage and Performance Hierarchy
 
-1. Tier 1: GPU HBM: Velocidad máxima, capacidad mínima.
-2. Tier 2: CPU RAM: Capacidad media, latencia moderada.
-3. Tier 3: Local SSD (vía emptyDir): Capacidad masiva.
+1. Tier 1: GPU HBM: Maximum speed, minimum capacity.
+2. Tier 2: CPU RAM: Medium capacity, moderate latency.
+3. Tier 3: Local SSD (via `emptyDir`): Massive capacity.
 
-Evidencia de Impacto: Según benchmarks en GKE, la implementación del Tier 3 (SSD Local) para contextos largos de 100k tokens permite:
+Impact Evidence: According to GKE benchmarks, implementing Tier 3 (Local SSD) for long contexts of 100k tokens enables:
 
-* Una reducción del 79% en el TTFT, ya que evita la re-computación de prefijos.
-* Un incremento del 264% en el Throughput de entrada.
+* A 79% reduction in TTFT, by avoiding prefix recomputation.
+* A 264% increase in input throughput.
 
-Ruteo Prefix-Aware
+Prefix-Aware Routing
 
-El GKE Inference Gateway utiliza Prefix-aware routing para dirigir solicitudes con prompts similares a los mismos nodos. Esto maximiza el "hit ratio" del caché y es la diferencia entre un sistema que escala y uno que colapsa bajo carga.
+The GKE Inference Gateway uses prefix-aware routing to direct requests with similar prompts to the same nodes. This maximizes cache hit ratio and is the difference between a system that scales and one that collapses under load.
 
-7. Protocolo de Ejecución y Optimización de Presupuesto
+7. Execution Protocol and Budget Optimization
 
-Como arquitectos seniors, el manejo del presupuesto es una métrica de éxito. Este laboratorio ha sido diseñado para costar entre **$2 y 4 USD por sesión**, comparado con los >60 USD que costaría una implementación basada en TPUs v6e.
+As senior architects, budget handling is a success metric. This lab is designed to cost between **$2 and $4 USD per session**, compared to the >$60 USD that a TPU v6e-based implementation would cost.
 
-Checklist del Ciclo de Vida
+Lifecycle Checklist
 
-1. Aprovisionamiento (15 min): terraform apply. Levantamos la VPC con MTU 8896 y los node pools de L4.
-2. Orquestación: kubectl apply de los manifiestos de plataforma (KubeRay, kgateway).
-3. Deploy & Test (30 min): Despliegue de Llama-3-8B y ejecución de pruebas de carga. Monitoreo obligatorio de la saturación de VRAM en Grafana.
-4. Destrucción Inmediata: terraform destroy.
+1. Provisioning (15 min): `terraform apply`. Bring up the VPC with MTU 8896 and L4 node pools.
+2. Orchestration: `kubectl apply` for platform manifests (KubeRay, kgateway).
+3. Deploy & Test (30 min): Deploy Llama-3-8B and run load tests. Mandatory monitoring of VRAM saturation in Grafana.
+4. Immediate Teardown: `terraform destroy`.
 
-Mandato final: No persista recursos. La infraestructura debe ser tratada como efímera. La maestría técnica viene de la capacidad de levantar y destruir este stack completo en minutos, no de mantenerlo encendido.
+Final mandate: Do not persist resources. Infrastructure must be treated as ephemeral. Technical mastery comes from the ability to bring up and tear down this full stack in minutes, not from keeping it running.
